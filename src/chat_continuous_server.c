@@ -29,6 +29,11 @@ pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 atomic_ullong total_bytes_received = 0;
 atomic_ullong total_messages_received = 0;
 
+double elapsed_seconds(struct timespec start, struct timespec end) {
+    return (end.tv_sec - start.tv_sec) +
+           (end.tv_nsec - start.tv_nsec) / 1000000000.0;
+}
+
 int send_all(int fd, const char *data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
@@ -192,10 +197,10 @@ void *bot_thread_func(void *arg) {
                         }
                         /* Delay proporcional à metade do tamanho da mensagem */
                         if(actual_size < 1000) {
-                            usleep(actual_size / 2);
+                            usleep(actual_size * 5);
                         }
                         else{
-                            usleep(actual_size * 2.5);
+                            usleep(actual_size * 10);
                         }
                     }
                     free(payload);
@@ -212,8 +217,7 @@ void *bot_thread_func(void *arg) {
     return NULL;
 }
 
-void log_metrics_csv(const char *filename, int msg_size, int clients_count, 
-                     unsigned long long msgs, unsigned long long bytes, double avg_size) {
+void log_metrics_csv(const char *filename, int msg_size, int clients_count, unsigned long long msgs, unsigned long long bytes, double avg_size, double duration) {
     int file_exists = (access(filename, F_OK) == 0);
     FILE *f = fopen(filename, "a");
     if (!f) {
@@ -222,10 +226,10 @@ void log_metrics_csv(const char *filename, int msg_size, int clients_count,
     }
 
     if (!file_exists) {
-        fprintf(f, "tamanho_alvo_bytes,clientes_ativos,total_mensagens,total_bytes,tamanho_medio_bytes\n");
+        fprintf(f, "tamanho_alvo_bytes,clientes_ativos,total_mensagens,total_bytes,tamanho_medio_bytes,duracao_segundos\n");
     }
 
-    fprintf(f, "%d,%d,%llu,%llu,%.2f\n", msg_size, clients_count, msgs, bytes, avg_size);
+    fprintf(f, "%d,%d,%llu,%llu,%.2f,%.3f\n", msg_size, clients_count, msgs, bytes, avg_size, duration);
     fclose(f);
     printf("  [CSV] Metricas salvas em: %s\n", filename);
 }
@@ -237,6 +241,10 @@ void *test_coordinator(void *arg) {
     int message_sizes[] = {1, 10, 100};
     int num_tests = 3;
     int bot_fds[10];
+
+    for (int i = 0; i < 10; i++) {
+        bot_fds[i] = -1;
+    }
 
     const char *csv_filename = "metricas_teste.csv";
     remove(csv_filename);
@@ -286,9 +294,17 @@ void *test_coordinator(void *arg) {
             
             char cmd[64];
             snprintf(cmd, sizeof(cmd), "/START_SPAM %d\n", msg_size);
-            broadcast(cmd, NULL);
 
-            sleep(3);
+            // Start measuring
+            struct timespec test_start, test_end;
+            clock_gettime(CLOCK_MONOTONIC, &test_start);
+
+            broadcast(cmd, NULL);
+            sleep(4);
+
+            clock_gettime(CLOCK_MONOTONIC, &test_end);
+
+            double duration = elapsed_seconds(test_start, test_end);
 
             unsigned long long bytes = atomic_load(&total_bytes_received);
             unsigned long long msgs = atomic_load(&total_messages_received);
@@ -298,12 +314,16 @@ void *test_coordinator(void *arg) {
             printf("  > Total de mensagens recebidas : %llu\n", msgs);
             printf("  > Total de bytes recebidos     : %llu bytes\n", bytes);
             printf("  > Tamanho medio por mensagem   : %.2f bytes\n", avg_size);
+            printf("  > Tempo do teste                : %.3f segundos\n", duration);
 
-            log_metrics_csv(csv_filename, msg_size, i, msgs, bytes, avg_size);
+            log_metrics_csv(csv_filename, msg_size, i, msgs, bytes, avg_size, duration);
         }
 
         for (int i = 0; i < 10; i++) {
-            close(bot_fds[i]);
+            if (bot_fds[i] != -1) {
+                shutdown(bot_fds[i], SHUT_RDWR);
+                bot_fds[i] = -1;
+            }
         }
 
         printf("\n>>> Fim do ciclo de %d bytes. Aguardando 5 segundos para o proximo ciclo...\n", msg_size);
